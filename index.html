@@ -2,7 +2,7 @@
 <html lang="id">
 <head>
 <meta charset="UTF-8">
-<title>SCALPER ASSISTANT · CONTRACT VALID</title>
+<title>SCALPER ASSISTANT · CONTRACT VALID (+ Mission Lines)</title>
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 
 <style>
@@ -10,7 +10,13 @@ body{margin:0;background:#000;color:#00ff99;font-family:Consolas,monospace}
 #top{padding:8px;border-bottom:1px solid #222;display:flex;gap:10px;align-items:center}
 select,button,input{background:#111;color:#fff;border:1px solid #444;padding:6px;font-family:Consolas}
 #status{font-weight:bold}
+#tvWrap{position:relative}
 #tv{width:100%;height:38vh;border:none}
+#overlay{position:absolute;inset:0;pointer-events:none}
+.mission-line{position:absolute;left:0;right:0;height:1px;opacity:.75}
+.m15{background:#ffd700}   /* emas */
+.m30{background:#00ffff}   /* cyan */
+.h1 {background:#ff5555}   /* merah */
 #panel{height:62vh;overflow:auto;padding:8px}
 .section{border:1px solid #333;margin-bottom:8px;padding:8px;background:#070707}
 .buy{color:#00ff99}.sell{color:#ff5555}.wait{color:#ffaa00}.ctx{color:#888}.bad{color:#ff4444}
@@ -18,6 +24,8 @@ table{width:100%;border-collapse:collapse;font-size:12px}
 th,td{border-bottom:1px solid #222;padding:4px}
 #reason{display:none;border-left:4px solid #ffaa00;padding:8px;white-space:pre-line}
 .zone{background:rgba(0,255,255,.15);border:1px solid rgba(0,255,255,.6);height:36px}
+.legend{font-size:11px;color:#bbb}
+.legend span{margin-right:10px}
 </style>
 </head>
 
@@ -33,7 +41,16 @@ th,td{border-bottom:1px solid #222;padding:4px}
 <button id="toggleReason">SHOW</button>
 </div>
 
-<iframe id="tv"></iframe>
+<div id="tvWrap">
+  <iframe id="tv"></iframe>
+  <div id="overlay"></div>
+</div>
+
+<div class="legend" style="padding:6px 8px;border-bottom:1px solid #222">
+  <span style="color:#ffd700">— M15 Mission</span>
+  <span style="color:#00ffff">— M30 Mission</span>
+  <span style="color:#ff5555">— H1 Mission</span>
+</div>
 
 <div id="panel">
 
@@ -66,198 +83,165 @@ C <input id="c" size="7">
 
 <script>
 /* ========================= CORE STATE ========================= */
-const TF = ["1m","5m","15m","30m","1h"];
-const STORAGE_KEY = "SCALPER_CONTRACT_VALID_V1";
-
-function freshPair(){
-  return { price:null, anchor:null, anchorState:"NONE", tf:{} };
-}
-
-let STATE = JSON.parse(localStorage.getItem(STORAGE_KEY)||"{}");
-if(!STATE.BTCUSDT) STATE.BTCUSDT=freshPair();
-if(!STATE.XAUUSD)  STATE.XAUUSD =freshPair();
-
+const TF=["1m","5m","15m","30m","1h"];
+const STORAGE_KEY="SCALPER_CONTRACT_VALID_V1";
+function freshPair(){return{price:null,anchor:null,anchorState:"NONE",tf:{}}}
+let STATE=JSON.parse(localStorage.getItem(STORAGE_KEY)||"{}");
+if(!STATE.BTCUSDT)STATE.BTCUSDT=freshPair();
+if(!STATE.XAUUSD) STATE.XAUUSD =freshPair();
 TF.forEach(tf=>{
-  if(!STATE.BTCUSDT.tf[tf]) STATE.BTCUSDT.tf[tf]={prevClose:null,lastClose:null,missions:[]};
-  if(!STATE.XAUUSD.tf[tf])  STATE.XAUUSD.tf[tf] ={prevClose:null,lastClose:null,missions:[]};
+  if(!STATE.BTCUSDT.tf[tf])STATE.BTCUSDT.tf[tf]={prevClose:null,lastClose:null,missions:[]};
+  if(!STATE.XAUUSD.tf[tf]) STATE.XAUUSD.tf[tf] ={prevClose:null,lastClose:null,missions:[]};
 });
+function save(){localStorage.setItem(STORAGE_KEY,JSON.stringify(STATE));}
 
-function save(){ localStorage.setItem(STORAGE_KEY,JSON.stringify(STATE)); }
-
-/* ========================= ANCHOR LIFECYCLE ========================= */
-const ANCHOR_MAX_AGE = 1000*60*60*4;
-function updateAnchor(pair){
-  if(!pair.anchor){ pair.anchorState="NONE"; return; }
-  let age=Date.now()-pair.anchor.time;
-  if(pair.anchor.invalid) pair.anchorState="INVALID";
-  else if(age>ANCHOR_MAX_AGE) pair.anchorState="EXPIRED";
-  else if(age>ANCHOR_MAX_AGE*0.6) pair.anchorState="SUSPECT";
-  else pair.anchorState="OK";
+/* ========================= ANCHOR ========================= */
+const ANCHOR_MAX_AGE=1000*60*60*4;
+function updateAnchor(p){
+  if(!p.anchor){p.anchorState="NONE";return;}
+  let age=Date.now()-p.anchor.time;
+  if(p.anchor.invalid)p.anchorState="INVALID";
+  else if(age>ANCHOR_MAX_AGE)p.anchorState="EXPIRED";
+  else if(age>ANCHOR_MAX_AGE*0.6)p.anchorState="SUSPECT";
+  else p.anchorState="OK";
 }
 
 /* ========================= MISSION ENGINE ========================= */
-/* Mission dibuat dari PREVIOUS CLOSE (bukan close sekarang) */
-function createMission(tfData){
-  if(tfData.prevClose===null) return;
-  let m={
-    price: tfData.prevClose,
-    status:"ACTIVE",
-    role: ["15m","30m","1h"].includes(tfData.tf) ? "CONTEXT":"TARGET"
-  };
-  tfData.missions.push(m);
+function createMission(d){
+  if(d.prevClose===null)return;
+  d.missions.push({
+    price:d.prevClose,
+    role:(d.tf==="15m"||d.tf==="30m"||d.tf==="1h")?"CONTEXT":"TARGET",
+    status:"ACTIVE"
+  });
 }
-
-/* Status mission berbasis CLOSE behavior */
-function updateMissions(tfData, close){
-  tfData.missions.forEach(m=>{
+function updateMissions(d,close){
+  d.missions.forEach(m=>{
     if(m.status==="ACTIVE"){
-      if(close===m.price) m.status="CONSUMED";
-      else if((m.price>close && tfData.lastClose< m.price && close< m.price) ||
-              (m.price<close && tfData.lastClose> m.price && close> m.price))
-        m.status="WAITING";
-      else if(m.role==="CONTEXT") m.status="CONTEXT";
+      if(close===m.price)m.status="CONSUMED";
+      else if(m.role==="CONTEXT")m.status="CONTEXT";
+      else m.status="WAITING";
     }
   });
-  tfData.missions=tfData.missions.filter(m=>m.status!=="CONSUMED");
+  d.missions=d.missions.filter(m=>m.status!=="CONSUMED");
 }
 
 /* ========================= BTCUSDT WS ========================= */
 let ws;
 function connectWS(){
-  if(ws) ws.close();
+  if(ws)ws.close();
   ws=new WebSocket("wss://stream.binance.com:9443/stream?streams="+TF.map(t=>"btcusdt@kline_"+t).join("/"));
   ws.onmessage=e=>{
-    let k=JSON.parse(e.data).data.k;
-    if(!k.x) return;
-    let tf=k.i, close=+k.c;
-    let p=STATE.BTCUSDT;
-    let d=p.tf[tf];
-    d.prevClose=d.lastClose;
-    d.lastClose=close;
-    p.price=close;
-    createMission(d);
-    updateMissions(d,close);
-    updateAnchor(p);
-    save(); render();
+    let k=JSON.parse(e.data).data.k;if(!k.x)return;
+    let tf=k.i,close=+k.c,p=STATE.BTCUSDT,d=p.tf[tf];
+    d.tf=tf; d.prevClose=d.lastClose; d.lastClose=close; p.price=close;
+    createMission(d); updateMissions(d,close); updateAnchor(p); save(); render();
   };
 }
-connectWS();
-setInterval(()=>{ if(!ws||ws.readyState>1) connectWS(); },5000);
+connectWS(); setInterval(()=>{if(!ws||ws.readyState>1)connectWS()},5000);
 
 /* ========================= XAUUSD SYNTH LOOP ========================= */
 setInterval(()=>{
-  let p=STATE.XAUUSD;
-  if(!p.anchor) return;
+  let p=STATE.XAUUSD;if(!p.anchor)return;
   let close=p.anchor.C;
   TF.forEach(tf=>{
-    let d=p.tf[tf];
-    d.prevClose=d.lastClose;
-    d.lastClose=close;
-    createMission(d);
-    updateMissions(d,close);
+    let d=p.tf[tf]; d.tf=tf; d.prevClose=d.lastClose; d.lastClose=close;
+    createMission(d); updateMissions(d,close);
   });
-  p.price=close;
-  updateAnchor(p);
-  save(); render();
+  p.price=close; updateAnchor(p); save(); render();
 },60000);
 
 /* ========================= DECISION ========================= */
-function decide(dir){
-  let p=STATE[pairSel.value];
-  updateAnchor(p);
+const pairSel=document.getElementById("pair");
+const status=document.getElementById("status");
+const reason=document.getElementById("reason");
+const missionTable=document.getElementById("missionTable");
+const entryZone=document.getElementById("entryZone");
+const overlay=document.getElementById("overlay");
 
+function decide(dir){
+  let p=STATE[pairSel.value]; updateAnchor(p);
   if(p.anchorState!=="OK"){
     status.textContent="TUNGGU · ANCHOR "+p.anchorState;
     reason.textContent="Anchor H1 tidak sehat.\nEntry ditahan.";
-    entryZone.innerHTML="";
-    return;
+    entryZone.innerHTML=""; return;
   }
-
   let conflict=[];
   TF.forEach(tf=>{
     let m=p.tf[tf].missions[0];
-    if(!m||m.role==="CONTEXT") return;
+    if(!m||m.role==="CONTEXT")return;
     let bias=m.price>p.price?"SELL":"BUY";
-    if(bias!==dir) conflict.push(tf);
+    if(bias!==dir)conflict.push(tf);
   });
-
   if(conflict.length){
     status.textContent="TUNGGU · KONFLIK";
     reason.textContent=dir+" ditahan.\nKonflik TF: "+conflict.join(", ");
-    entryZone.innerHTML="";
-    return;
+    entryZone.innerHTML=""; return;
   }
-
   status.textContent="GAS "+dir;
-  reason.textContent=
-    dir+" searah konteks.\n"+
-    "M1–M5 eksekusi.\n"+
-    "M15–H1 konteks.\n"+
-    "TP 1–2 candle.";
-
-  /* Entry zone dihitung dari mission M1 & M5 */
-  let m1=p.tf["1m"].missions[0];
-  let m5=p.tf["5m"].missions[0];
+  reason.textContent=dir+" searah konteks.\nM1–M5 eksekusi.\nM15–H1 konteks.\nTP 1–2 candle.";
+  let m1=p.tf["1m"].missions[0], m5=p.tf["5m"].missions[0];
   if(m1&&m5){
-    entryZone.innerHTML=
-      `<div class="zone">IDEAL AREA ${Math.min(m1.price,m5.price).toFixed(2)}
-       – ${Math.max(m1.price,m5.price).toFixed(2)}</div>`;
+    entryZone.innerHTML=`<div class="zone">IDEAL ${Math.min(m1.price,m5.price).toFixed(2)} – ${Math.max(m1.price,m5.price).toFixed(2)}</div>`;
   }
   gasSound();
 }
 
 /* ========================= SOUND ========================= */
 const AC=new (window.AudioContext||window.webkitAudioContext)();
-function gasSound(){
-  let i=0;let t=setInterval(()=>{
-    let o=AC.createOscillator(),g=AC.createGain();
-    o.frequency.value=1000;g.gain.value=.08;
-    o.connect(g);g.connect(AC.destination);
-    o.start();o.stop(AC.currentTime+.12);
-    if(++i===4) clearInterval(t);
-  },180);
+function gasSound(){let i=0,t=setInterval(()=>{
+  let o=AC.createOscillator(),g=AC.createGain();
+  o.frequency.value=1000; g.gain.value=.08; o.connect(g); g.connect(AC.destination);
+  o.start(); o.stop(AC.currentTime+.12); if(++i===4)clearInterval(t);
+},180);}
+
+/* ========================= VISUAL: MISSION LINES (ADD ONLY) ========================= */
+function renderMissionLines(){
+  overlay.innerHTML="";
+  let p=STATE[pairSel.value]; if(!p.price)return;
+  const price=p.price;
+  const H=overlay.clientHeight;
+  const scale=(v)=> H/2 - ((v-price)/price)*(H/2); // sederhana & stabil
+  ["15m","30m","1h"].forEach(tf=>{
+    let d=p.tf[tf]; if(!d.missions.length)return;
+    d.missions.forEach(m=>{
+      if(m.role!=="CONTEXT")return;
+      let y=scale(m.price);
+      let l=document.createElement("div");
+      l.className=`mission-line ${tf==="15m"?"m15":tf==="30m"?"m30":"h1"}`;
+      l.style.top=y+"px";
+      overlay.appendChild(l);
+    });
+  });
 }
 
-/* ========================= UI ========================= */
-const pairSel=document.getElementById("pair");
-const status=document.getElementById("status");
-const reason=document.getElementById("reason");
-const missionTable=document.getElementById("missionTable");
-const entryZone=document.getElementById("entryZone");
-
+/* ========================= RENDER ========================= */
 function render(){
   let p=STATE[pairSel.value];
   status.textContent=pairSel.value+" · "+p.anchorState;
   let html="";
   TF.forEach(tf=>{
     let d=p.tf[tf];
-    if(!d.missions.length)
-      html+=`<tr><td>${tf}</td><td>-</td><td>-</td><td class="wait">WAIT</td></tr>`;
+    if(!d.missions.length)html+=`<tr><td>${tf}</td><td>-</td><td>-</td><td class="wait">WAIT</td></tr>`;
     else d.missions.forEach(m=>{
-      html+=`<tr>
-      <td>${tf}</td>
-      <td>${m.price.toFixed(2)}</td>
-      <td class="${m.role==="CONTEXT"?"ctx":""}">${m.role}</td>
-      <td>${m.status}</td>
-      </tr>`;
+      html+=`<tr><td>${tf}</td><td>${m.price.toFixed(2)}</td><td class="${m.role==="CONTEXT"?"ctx":""}">${m.role}</td><td>${m.status}</td></tr>`;
     });
   });
   missionTable.innerHTML=html;
+  renderMissionLines();
 }
 
+/* ========================= UI ========================= */
 document.getElementById("setAnchor").onclick=()=>{
   let O=+o.value,H=+h.value,L=+l.value,C=+c.value;
   let p=STATE[pairSel.value];
-  if(H<Math.max(O,C)||L>Math.min(O,C)||O===C)
-    p.anchor={invalid:true,time:Date.now()};
+  if(H<Math.max(O,C)||L>Math.min(O,C)||O===C)p.anchor={invalid:true,time:Date.now()};
   else p.anchor={O,H,L,C,time:Date.now()};
   updateAnchor(p); save(); render();
 };
-
 document.getElementById("buy").onclick=()=>decide("BUY");
 document.getElementById("sell").onclick=()=>decide("SELL");
 document.getElementById("toggleReason").onclick=()=>reason.style.display=reason.style.display==="block"?"none":"block";
-
 function loadChart(){
   let sym=pairSel.value==="BTCUSDT"?"BINANCE:BTCUSDT":"OANDA:XAUUSD";
   tv.src=`https://s.tradingview.com/widgetembed/?symbol=${sym}&interval=60&theme=dark&timezone=Etc/UTC`;
