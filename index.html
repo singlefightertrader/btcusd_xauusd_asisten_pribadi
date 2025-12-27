@@ -2,7 +2,7 @@
 <html lang="id">
 <head>
 <meta charset="UTF-8">
-<title>SCALPER ASSISTANT · CONTRACT VALID</title>
+<title>SCALPER ASSISTANT · CONTEXT SHIFT SAFE</title>
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 
 <style>
@@ -10,14 +10,12 @@ body{margin:0;background:#000;color:#00ff99;font-family:Consolas,monospace}
 #top{padding:8px;border-bottom:1px solid #222;display:flex;gap:10px;align-items:center}
 select,button,input{background:#111;color:#fff;border:1px solid #444;padding:6px;font-family:Consolas}
 button.active{background:#00ff99;color:#000}
+button.set-active{background:#ffaa00;color:#000}
 #status{font-weight:bold}
 
 #chartWrap{position:relative}
 #tv{width:100%;height:40vh;border:none}
-#overlay{
-  position:absolute;top:0;left:0;right:0;bottom:0;
-  pointer-events:none;
-}
+#overlay{position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none}
 .mline{position:absolute;left:0;right:0;height:1px;opacity:.9}
 .m15{background:#ffff00}
 .m30{background:#00bfff}
@@ -43,10 +41,7 @@ button.active{background:#00ff99;color:#000}
 
 <div id="top">
 <b>PAIR</b>
-<select id="pair">
-<option>BTCUSDT</option>
-<option>XAUUSD</option>
-</select>
+<select id="pair"><option>BTCUSDT</option><option>XAUUSD</option></select>
 <b id="status">BOOT</b>
 <button id="toggleReason">SHOW</button>
 <button id="toggleLines">MISSION LINES</button>
@@ -77,13 +72,12 @@ C <input id="c" size="7">
 </div>
 
 <div id="reason"></div>
-
 </div>
 
 <script>
 /* ================= STATE ================= */
 const TF=["1m","5m","15m","30m","1h"];
-const KEY="SCALPER_CONTRACT_VALID";
+const KEY="SCALPER_CONTEXT_SHIFT";
 let STATE=JSON.parse(localStorage.getItem(KEY)||"{}");
 function init(){return{price:null,anchor:null,anchorState:"NONE",tf:{}}}
 ["BTCUSDT","XAUUSD"].forEach(p=>{
@@ -105,23 +99,47 @@ function updateAnchor(p){
  else p.anchorState="OK";
 }
 
-/* ================= MISSIONS ================= */
+/* ================= MISSIONS (SHIFT SAFE) ================= */
 function createMission(d){
  if(d.prev===null)return;
+ let lastContext=d.missions.find(m=>m.role==="CONTEXT" && m.state==="VALID");
+ if(lastContext)return; // jangan buat context baru kalau masih valid
  d.missions.push({
   price:d.prev,
   role:["15m","30m","1h"].includes(d.tf)?"CONTEXT":"TARGET",
-  status:"ACTIVE"
+  status:"ACTIVE",
+  state:"VALID"
  });
 }
+
 function updateMission(d,close){
  d.missions.forEach(m=>{
-  if(m.status==="ACTIVE"){
+  if(m.state!=="VALID")return;
+  if(m.role==="CONTEXT"){
+   if(close===m.price){
+    m.status="CONSUMED";
+    m.state="EXPIRED";
+   }
+   else if(
+     (close>m.price && d.prev<m.price) ||
+     (close<m.price && d.prev>m.price)
+   ){
+    // BODY CLOSE MENEMBUS LEVEL
+    m.state="BREACHED";
+   }
+   else{
+    m.status="CONTEXT";
+   }
+  }else{
    if(close===m.price)m.status="CONSUMED";
-   else if(m.role==="CONTEXT")m.status="CONTEXT";
    else m.status="WAITING";
   }
  });
+ // jika ada context BREACHED → izinkan context baru
+ let breached=d.missions.find(m=>m.state==="BREACHED");
+ if(breached){
+  d.missions=d.missions.filter(m=>m!==breached);
+ }
  d.missions=d.missions.filter(m=>m.status!=="CONSUMED");
 }
 
@@ -133,8 +151,8 @@ function connect(){
   let k=JSON.parse(e.data).data.k;if(!k.x)return;
   let p=STATE.BTCUSDT,d=p.tf[k.i];
   d.tf=k.i;d.prev=d.last;d.last=+k.c;p.price=+k.c;
-  createMission(d);updateMission(d,+k.c);updateAnchor(p);
-  save();render();
+  updateMission(d,+k.c);createMission(d);
+  updateAnchor(p);save();render();
  };
 }
 connect();setInterval(()=>{if(!ws||ws.readyState>1)connect()},5000);
@@ -144,7 +162,7 @@ setInterval(()=>{
  let p=STATE.XAUUSD;if(!p.anchor)return;
  TF.forEach(tf=>{
   let d=p.tf[tf];d.tf=tf;d.prev=d.last;d.last=p.anchor.C;
-  createMission(d);updateMission(d,p.anchor.C);
+  updateMission(d,p.anchor.C);createMission(d);
  });
  p.price=p.anchor.C;updateAnchor(p);save();render();
 },60000);
@@ -163,23 +181,22 @@ function decide(dir){
  let p=STATE[pair.value];updateAnchor(p);
  buy.classList.remove("active");sell.classList.remove("active");
  this.classList.add("active");
-
  reason.textContent="";
  if(p.anchorState!=="OK"){status.textContent="WAIT · ANCHOR";return}
-
  let s=decisionState(p);
  decision.className=s.toLowerCase();
  status.textContent=s+" "+dir;
-
  let ctx=[];
  ["15m","30m","1h"].forEach(tf=>{
-  let m=p.tf[tf].missions[0];
-  if(m&&m.role==="CONTEXT")ctx.push(tf.toUpperCase()+" CONTEXT");
+  let m=p.tf[tf].missions.find(x=>x.role==="CONTEXT");
+  if(m){
+   if(m.state==="BREACHED")ctx.push(tf.toUpperCase()+" BREAK");
+   else ctx.push(tf.toUpperCase()+" CONTEXT");
+  }
  });
  reason.textContent=ctx.length
-  ? "KONTEKS AKTIF:\n"+ctx.join(", ")
-  : "EKSEKUSI M1–M5 SAJA";
-
+  ?"KONTEKS: "+ctx.join(", ")
+  :"EKSEKUSI M1–M5";
  if(s==="GAS")gasSound();
 }
 
@@ -198,7 +215,6 @@ function gasSound(){
 /* ================= MISSION LINES ================= */
 let showLines=true;
 toggleLines.onclick=()=>{showLines=!showLines;overlay.style.display=showLines?"block":"none"}
-
 function priceToY(price){
  let p=STATE[pair.value];
  let prices=["1m","5m","15m"].map(tf=>p.tf[tf].last).filter(v=>v);
@@ -207,14 +223,13 @@ function priceToY(price){
  let h=overlay.clientHeight;
  return h-((price-min)/(max-min))*h;
 }
-
 function renderLines(){
  overlay.innerHTML="";
  if(!showLines)return;
  let p=STATE[pair.value];
  ["15m","30m","1h"].forEach(tf=>{
   p.tf[tf].missions.forEach(m=>{
-   if(m.status==="CONTEXT"){
+   if(m.role==="CONTEXT" && m.state==="VALID"){
     let y=priceToY(m.price);if(y===null)return;
     let d=document.createElement("div");
     d.className="mline "+(tf==="15m"?"m15":tf==="30m"?"m30":"m1h");
@@ -228,8 +243,8 @@ function renderLines(){
 buy.onclick=decide.bind(buy,"BUY");
 sell.onclick=decide.bind(sell,"SELL");
 toggleReason.onclick=()=>{reason.style.display=reason.style.display==="block"?"none":"block"};
-
 setAnchor.onclick=()=>{
+ setAnchor.classList.add("set-active");
  let O=+o.value,H=+h.value,L=+l.value,C=+c.value;
  let p=STATE[pair.value];
  if(H<Math.max(O,C)||L>Math.min(O,C)||O===C)p.anchor={bad:true,t:Date.now()};
@@ -252,4 +267,4 @@ loadChart();render();
 </script>
 
 </body>
-</html>
+  </html>
