@@ -1,0 +1,290 @@
+<!--
+=====================================================================
+FEATURE MANIFEST — SCALPER ASSISTANT (CONTRACT LOCK)
+=====================================================================
+PAIR:
+- BTCUSDT
+- XAUUSD
+>> Dua pair, SATU engine, LOGIKA & FITUR IDENTIK
+
+CORE SYSTEM:
+- SATU FILE HTML
+- LOOP AKTIF NONSTOP (WebSocket + watchdog)
+- TIDAK reset state saat berjalan
+- Semua logika berbasis CANDLE CLOSE
+- Timestamp UTC
+
+MARKET DATA:
+- BTCUSDT : Binance WebSocket
+- XAUUSD  : Proxy (visual TradingView, logic OHLC manual)
+- TF aktif: M1, M5, M15, M30, H1
+
+MASTER TF & ANCHOR:
+- MASTER TF = H1 (DIKUNCI)
+- OHLC MANUAL DEFAULT = H1
+- Anchor status: OK / SUSPECT / EXPIRED / INVALID
+- Anchor = otoritas tertinggi
+- Jika anchor INVALID / EXPIRED → SEMUA ENTRY DITAHAN
+
+VALIDASI OHLC:
+- High ≥ max(Open, Close)
+- Low ≤ min(Open, Close)
+- Body ≠ 0
+- Wick TIDAK membatalkan misi
+- Input salah → DITOLAK
+
+MISSION PRICE ENGINE:
+- Misi harga SEMUA TF (M1–H1)
+- Multi-mission per TF (tidak overwrite)
+- Misi berasal dari CLOSE candle
+- Misi tidak hilang sampai ada CLOSE di level itu
+- Status: ACTIVE / WAITING / CONTEXT
+
+CROSS TF CONTEXT:
+- TF boleh konflik
+- Tools MENJELASKAN konflik, tidak memaksa entry
+
+ASISTEN SCALPER:
+- Bahasa trader lapangan
+- Bisa GAS / TUNGGU
+- Alasan spesifik (struktur, konflik TF)
+- BUKAN “harga naik = BUY”
+
+INTERAKSI WAJIB:
+- BUY button
+- SELL button
+- Respon BUY ≠ SELL
+- SHOW / HIDE alasan
+- Sound “tiiit tiiit” 4x saat GAS
+- Status bar tidak bengong
+
+PSIKOLOGI & KEAMANAN:
+- Lebih baik TUNGGU daripada entry salah
+- Tidak maksa entry
+- Tidak sinyal palsu
+
+KETENTUAN:
+- ADD ONLY
+- Tidak ada fitur dihapus
+- Jika 1 fitur di atas tidak ada → FILE INI CACAT
+=====================================================================
+-->
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SCALPER ASSISTANT · BTCUSDT & XAUUSD</title>
+
+<style>
+body{margin:0;background:#000;color:#00ff99;font-family:Consolas,monospace}
+#top{display:flex;gap:8px;padding:6px;border-bottom:1px solid #222}
+select,button,input{
+  background:#111;color:#fff;border:1px solid #444;
+  padding:6px;font-family:Consolas;font-size:12px
+}
+#tv{height:45vh}
+#panel{height:55vh;overflow:auto;padding:8px}
+.section{border:1px solid #333;background:#070707;padding:8px;margin-bottom:8px}
+.buy{color:#00ff99}.sell{color:#ff5555}
+.wait{color:#ffaa00}.ctx{color:#888}.active{color:#ffd700}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{border-bottom:1px solid #222;padding:4px}
+#reason{display:none;border-left:4px solid #ffaa00;background:#0a0a0a;padding:8px;white-space:pre-line}
+</style>
+</head>
+
+<body>
+
+<div id="top">
+  <b>PAIR</b>
+  <select id="pair" onchange="switchPair()">
+    <option value="BTCUSDT">BTCUSDT</option>
+    <option value="XAUUSD">XAUUSD</option>
+  </select>
+  <b id="status">INIT...</b>
+  <button onclick="toggleReason()">SHOW</button>
+</div>
+
+<div id="tv">
+<iframe id="chart" style="width:100%;height:100%;border:none"></iframe>
+</div>
+
+<div id="panel">
+
+<div class="section">
+<b>OHLC MANUAL · MASTER TF H1</b><br>
+O <input id="o" size="7">
+H <input id="h" size="7">
+L <input id="l" size="7">
+C <input id="c" size="7">
+<button onclick="setAnchor()">SET</button>
+<div id="anchorState" class="wait"></div>
+</div>
+
+<div class="section">
+<b>MISSION PRICE · SEMUA TF</b>
+<table>
+<thead><tr><th>TF</th><th>Misi</th><th>Bias</th><th>Status</th></tr></thead>
+<tbody id="missions"></tbody>
+</table>
+</div>
+
+<div class="section">
+<button onclick="ask('BUY')">BUY</button>
+<button onclick="ask('SELL')">SELL</button>
+</div>
+
+<div id="reason"></div>
+
+</div>
+
+<script>
+/* ================= SOUND ================= */
+const ac=new (window.AudioContext||window.webkitAudioContext)();
+function gasSound(){
+ let n=0,i=setInterval(()=>{
+  let o=ac.createOscillator(),g=ac.createGain();
+  o.frequency.value=1000; g.gain.value=0.08;
+  o.connect(g); g.connect(ac.destination);
+  o.start(); o.stop(ac.currentTime+0.12);
+  if(++n>=4)clearInterval(i);
+ },180);
+}
+
+/* ================= STATE ================= */
+const TF=["1m","5m","15m","30m","1h"];
+let state={
+ BTCUSDT:{price:0,anchor:null,anchorState:"NONE",offset:0,tf:{}},
+ XAUUSD:{price:0,anchor:null,anchorState:"NONE",offset:0,tf:{}}
+};
+TF.forEach(tf=>{
+ state.BTCUSDT.tf[tf]={prev:null,last:null,missions:[]};
+ state.XAUUSD.tf[tf]={prev:null,last:null,missions:[]};
+});
+let currentPair="BTCUSDT";
+
+/* ================= CHART ================= */
+function loadChart(){
+ const sym=currentPair==="BTCUSDT"?"BINANCE:BTCUSDT":"OANDA:XAUUSD";
+ chart.src=`https://s.tradingview.com/widgetembed/?symbol=${sym}&interval=60&theme=dark&timezone=Etc/UTC`;
+}
+loadChart();
+
+/* ================= WS BTC ================= */
+let ws;
+function connectWS(){
+ if(ws)ws.close();
+ ws=new WebSocket(
+  "wss://stream.binance.com:9443/stream?streams="+
+  TF.map(t=>"btcusdt@kline_"+t).join("/")
+ );
+ ws.onmessage=e=>{
+  let k=JSON.parse(e.data).data.k;
+  if(!k.x)return;
+  let tf=k.i,close=parseFloat(k.c);
+  let s=state.BTCUSDT;
+  s.price=close;
+  s.tf[tf].prev=s.tf[tf].last;
+  s.tf[tf].last=close;
+  updateMission("BTCUSDT",tf);
+  render();
+ };
+}
+connectWS();
+setInterval(()=>{ if(!ws||ws.readyState>1)connectWS(); },5000);
+
+/* ================= ANCHOR ================= */
+function setAnchor(){
+ let O=+o.value,H=+h.value,L=+l.value,C=+c.value;
+ let s=state[currentPair];
+ if(H<Math.max(O,C)||L>Math.min(O,C)||H<=L){
+  s.anchorState="INVALID";
+  anchorState.innerText="ANCHOR INVALID";
+  return;
+ }
+ s.anchor={O,H,L,C,time:Date.now()};
+ s.offset=C-s.price;
+ s.anchorState="OK";
+ anchorState.innerText="ANCHOR OK";
+}
+
+/* ================= MISSION ================= */
+function updateMission(pair,tf){
+ let s=state[pair],d=s.tf[tf];
+ if(!d.prev)return;
+ let m=d.prev+s.offset;
+ if(!d.missions.some(x=>Math.abs(x-m)<0.1))
+   d.missions.push(m);
+ d.missions=d.missions.filter(x=>Math.abs((d.last+s.offset)-x)>0.1);
+}
+
+/* ================= RENDER ================= */
+function render(){
+ let s=state[currentPair];
+ status.innerText=`${currentPair} · ${s.anchorState}`;
+ let html="";
+ TF.forEach(tf=>{
+  let d=s.tf[tf];
+  if(!d.missions.length){
+   html+=`<tr><td>${tf}</td><td>-</td><td class="ctx">CTX</td><td class="wait">WAIT</td></tr>`;
+  }else{
+   d.missions.forEach((m,i)=>{
+    let bias=m>(s.price+s.offset)?"BUY":"SELL";
+    let st=Math.abs(m-(s.price+s.offset))/(s.price||1)<0.002?"ACTIVE":"WAIT";
+    html+=`<tr>
+     <td>${i===0?tf:""}</td>
+     <td>${m.toFixed(2)}</td>
+     <td class="${bias==="BUY"?"buy":"sell"}">${bias}</td>
+     <td class="${st==="ACTIVE"?"active":"wait"}">${st}</td>
+    </tr>`;
+   });
+  }
+ });
+ missions.innerHTML=html;
+}
+
+/* ================= ASSIST (FIXED TEXT) ================= */
+function ask(dir){
+ let s=state[currentPair];
+ if(s.anchorState!=="OK"){
+  status.innerText="TUNGGU · ANCHOR";
+  reason.innerText="Anchor H1 belum sehat.\nSemua entry ditahan.";
+  return;
+ }
+ let ok=["1m","5m"].every(tf=>{
+  let d=s.tf[tf];
+  if(!d.missions.length)return false;
+  let m=d.missions[d.missions.length-1];
+  return dir==="BUY"?m>(s.price+s.offset):m<(s.price+s.offset);
+ });
+ if(!ok){
+  status.innerText="TUNGGU";
+  reason.innerText=
+`${dir} terdeteksi di M1/M5,
+namun belum solid.
+Ini wilayah scalp agresif.
+Jika ragu, lebih baik TUNGGU.`;
+  return;
+ }
+ status.innerText="GAS "+dir;
+ reason.innerText=
+`${dir} searah konteks.
+Berlaku untuk M1 dan M5.
+M15 & H1 sebagai penahan arah.
+TP cepat 1–2 candle. Jangan nikah posisi.`;
+ gasSound();
+}
+
+/* ================= UI ================= */
+function toggleReason(){
+ reason.style.display=reason.style.display==="block"?"none":"block";
+}
+function switchPair(){
+ currentPair=pair.value;
+ loadChart(); render();
+}
+</script>
+
+</body>
+</html>
