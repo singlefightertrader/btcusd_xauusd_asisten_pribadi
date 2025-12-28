@@ -2,20 +2,20 @@
 <html lang="id">
 <head>
 <meta charset="UTF-8">
-<title>SCALPER ASSISTANT · FINAL A++ (MT5 MASTER CLEAN)</title>
+<title>SCALPER ASSISTANT · M15 MANUAL LOCK (NO STORAGE)</title>
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-
 <style>
 body{margin:0;background:#000;color:#00ff99;font-family:Consolas,monospace}
 #top{padding:8px;border-bottom:1px solid #222;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-select,button,input{background:#111;color:#fff;border:1px solid #444;padding:6px;font-family:Consolas}
+input,button{background:#111;color:#fff;border:1px solid #444;padding:6px;font-family:Consolas}
 #status{font-weight:bold}
 #tv{width:100%;height:38vh;border:none}
 #panel{height:62vh;overflow:auto;padding:8px}
 .section{border:1px solid #333;margin-bottom:8px;padding:8px;background:#070707}
 .ctx{white-space:pre-line}
-.warn{color:#ff4444}
 .ok{color:#00ff99}
+.warn{color:#ffaa00}
+.lock{color:#00ff99;font-weight:bold}
 </style>
 </head>
 
@@ -23,138 +23,139 @@ select,button,input{background:#111;color:#fff;border:1px solid #444;padding:6px
 
 <div id="top">
 <b>PAIR</b>
-<select id="pair">
-<option>BTCUSDT</option>
-<option>XAUUSD</option>
-</select>
-<b id="status">BOOT</b>
+<span>BTCUSDT</span>
+<b id="status">WAIT M15</b>
+
+<input id="m15close" type="number" step="0.01"
+placeholder="INPUT M15 CLOSE"
+style="width:160px;border:1px solid #00ff99;color:#00ff99">
+
+<button id="lockBtn">LOCK M15</button>
+<span id="lockInfo" class="warn">M15 BELUM DISET</span>
 </div>
 
 <iframe id="tv"></iframe>
 
 <div id="panel">
-
 <div class="section">
-<b>ANCHOR H1 · MANUAL OHLC</b><br>
-O <input id="o" size="7">
-H <input id="h" size="7">
-L <input id="l" size="7">
-C <input id="c" size="7">
-<button id="setAnchor">SET</button>
-<div id="anchorState"></div>
+<b>MISSION STATUS</b>
+<div id="mission" class="ctx"></div>
 </div>
-
-<div class="section">
-<b>MISSION (HTF → LTF)</b>
-<div id="missionState" class="ctx"></div>
-</div>
-
-<div class="section">
-<b>MT5 SYNC (MASTER PRICE)</b><br>
-<input id="mt5Price" placeholder="MT5 PRICE" size="10">
-<button id="syncBtn">SYNC</button>
-<div id="syncState" class="warn">NOT SYNC</div>
-</div>
-
 </div>
 
 <script>
-/* ================= CORE STATE ================= */
-const TF=["1m","5m","15m","1h"];
-const STATE={
- price:null,
- anchor:null,
- anchorState:"NONE",
- missions:[]
+/* =========================================================
+   KONTRAK INTI
+   - Binance = bentuk candle (visual)
+   - M15 CLOSE manual = harga keputusan
+   - TIDAK pakai localStorage
+   - Refresh / clear data = input ulang (DISENGAJA)
+   ========================================================= */
+
+const TF=["1m","5m","15m"];
+let STATE={
+  price:null,
+  tf:{}
+};
+TF.forEach(tf=>STATE.tf[tf]={last:null,prev:null,missions:[]});
+
+/* ================= M15 LOCK ================= */
+const M15={
+  active:false,
+  price:null,
+  time:null
 };
 
-/* ================= ANCHOR ================= */
-function updateAnchor(){
- if(!STATE.anchor){STATE.anchorState="NONE";return;}
- const a=STATE.anchor;
- if(a.H<Math.max(a.O,a.C)||a.L>Math.min(a.O,a.C)){
-   STATE.anchorState="INVALID";return;
- }
- STATE.anchorState="OK";
+document.getElementById("lockBtn").onclick=()=>{
+  const v=parseFloat(document.getElementById("m15close").value);
+  if(isNaN(v)) return;
+  M15.active=true;
+  M15.price=v;
+  M15.time=Date.now();
+  document.getElementById("status").textContent="RUNNING · M15 LOCK";
+  updateLockInfo();
+};
+
+function updateLockInfo(){
+  if(!M15.active){
+    lockInfo.textContent="M15 BELUM DISET";
+    lockInfo.className="warn";
+    return;
+  }
+  const mins=Math.floor((Date.now()-M15.time)/60000);
+  lockInfo.textContent=`🔒 M15 TERKUNCI – ${mins} menit lewat (AMAN)`;
+  lockInfo.className="lock";
 }
+setInterval(updateLockInfo,30000);
 
-setAnchor.onclick=()=>{
- STATE.anchor={
-   O:+o.value,H:+h.value,L:+l.value,C:+c.value
- };
- updateAnchor();
- render();
-};
-
-/* ================= MT5 MASTER PRICE ================= */
-let MT5_OFFSET=0;
-let SYNC=false;
-
-syncBtn.onclick=()=>{
- if(!STATE.price)return;
- const mt5=+mt5Price.value;
- if(!mt5)return;
- MT5_OFFSET=mt5-STATE.price;
- SYNC=true;
- syncState.textContent="SYNCED (MT5 MASTER)";
- syncState.className="ok";
-};
-
+/* ================= HARGA AKTIF ================= */
 Object.defineProperty(window,"ACTIVE_PRICE",{
- get(){
-   if(!STATE.price)return null;
-   return SYNC ? STATE.price+MT5_OFFSET : STATE.price;
- }
+  get(){
+    if(M15.active) return M15.price;
+    return STATE.price;
+  }
 });
 
-/* ================= MISSIONS ================= */
-function rebuildMissions(){
- STATE.missions=[];
- if(!STATE.anchor||STATE.anchorState!=="OK")return;
-
- const dir=STATE.anchor.C>STATE.anchor.O?"BUY":"SELL";
- STATE.missions.push({
-   tf:"H1",
-   dir,
-   price:ACTIVE_PRICE
- });
+/* ================= MISSION ENGINE ================= */
+function createMission(tf){
+  const d=STATE.tf[tf];
+  if(d.prev===null || !M15.active) return;
+  const price=ACTIVE_PRICE;
+  if(d.missions.some(m=>m.price===price)) return;
+  d.missions.push({
+    price,
+    role:tf==="1m"?"TARGET":"CONTEXT",
+    status:"ACTIVE"
+  });
 }
-
-function updatePrice(price){
- STATE.price=price;
- rebuildMissions();
- render();
+function updateMissions(tf){
+  const d=STATE.tf[tf];
+  const close=ACTIVE_PRICE;
+  d.missions.forEach(m=>{
+    if(m.status==="CONSUMED")return;
+    if(close===m.price)m.status="CONSUMED";
+    else if(m.role==="CONTEXT")m.status="CONTEXT";
+    else m.status="WAITING";
+  });
 }
 
 /* ================= BINANCE WS ================= */
 let ws;
 function connect(){
- ws=new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@kline_1m");
- ws.onmessage=e=>{
-   const k=JSON.parse(e.data).k;
-   if(!k.x)return;
-   updatePrice(+k.c);
- };
+  ws=new WebSocket(
+    "wss://stream.binance.com:9443/stream?streams="+
+    TF.map(t=>"btcusdt@kline_"+t).join("/")
+  );
+  ws.onmessage=e=>{
+    const k=JSON.parse(e.data).data.k;
+    if(!k.x) return;
+
+    const tf=k.i;
+    const d=STATE.tf[tf];
+    d.prev=d.last;
+    d.last=+k.c;
+    STATE.price=+k.c;
+
+    createMission(tf);
+    updateMissions(tf);
+    render();
+  };
 }
 connect();
 
 /* ================= UI ================= */
 function render(){
- status.textContent="RUNNING";
- anchorState.textContent="ANCHOR: "+STATE.anchorState;
- missionState.textContent=
-   STATE.missions.map(m=>
-     `${m.tf} | ${m.dir} | ${m.price?.toFixed(2)}`
-   ).join("\n");
+  let out=[];
+  TF.forEach(tf=>{
+    STATE.tf[tf].missions.forEach(m=>{
+      out.push(`${tf} | ${m.price} | ${m.status}`);
+    });
+  });
+  mission.textContent=out.join("\n");
 }
 
 /* ================= CHART ================= */
-function loadChart(){
- const s=pair.value==="BTCUSDT"?"BINANCE:BTCUSDT":"OANDA:XAUUSD";
- tv.src=`https://s.tradingview.com/widgetembed/?symbol=${s}&interval=15&theme=dark`;
-}
-pair.onchange=loadChart;
-loadChart();
+tv.src="https://s.tradingview.com/widgetembed/?symbol=BINANCE:BTCUSDT&interval=15&theme=dark&timezone=Etc/UTC";
 </script>
 
 </body>
